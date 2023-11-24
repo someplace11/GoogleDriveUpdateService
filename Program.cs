@@ -3,7 +3,7 @@ using Google.Apis.Drive.v3;
 using Google.Apis.Services;
 using GoogleDriveUpdateService.Models;
 using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.DependencyInjection;
+using System.Net;
 
 namespace GoogleDriveUpdateService
 {
@@ -13,85 +13,97 @@ namespace GoogleDriveUpdateService
         {
             Console.WriteLine("Application starting...");
 
+            // Setup
             var config = new ConfigurationBuilder()
                 .SetBasePath(AppContext.BaseDirectory)
                 .AddJsonFile("appsettings.json", optional: false, reloadOnChange: true)
                 .Build();
 
-            // OAuth credentials
-            var clientId = config.GetSection("Google").GetSection("Credentials").GetSection("ClientId").Value;
-            var clientSecret = config.GetSection("Google").GetSection("Credentials").GetSection("ClientSecret").Value;
+            // Create OAuth credentials using a client ID and client secret
+            var credential = SetupUserCredential(config);
+
+            // Create Drive API service
+            var service = new DriveService(new BaseClientService.Initializer()
+            {
+                HttpClientInitializer = credential,
+                ApplicationName = config.GetSection("Google").GetSection("AppName").Value!
+            });
 
             // File names and paths you want to upload, read from appsettings
-            var filesUpdatedAtList = new List<FileDto>();
+            var filesToUpdateList = new List<TransferFile>();
             foreach (var child in config.GetSection("FileInfo").GetSection("FileList").GetChildren())
             {
-                var fileDtoToAdd = new FileDto
+                var TransferFileToAdd = new TransferFile
                 {
                     FileName = child.GetSection("FileName").Value!,
                     Path = child.GetSection($"FilePath").Value!
                 };
 
-                Console.WriteLine($"Adding file: {fileDtoToAdd.FileName}");
-                filesUpdatedAtList.Add(fileDtoToAdd);
+                filesToUpdateList.Add(TransferFileToAdd);
+                Console.WriteLine($"{TransferFileToAdd.FileName} added to update list");
             }
 
             // LastUpdatedTime.txt - to get all files' last updated date/time
-            var updatesRefFile = new FileDto
+            var lastUpdateRefFile = new TransferFile
             {
-                FileName = config.GetSection("FileInfo").GetSection("RefFile").GetSection("RefFileName").Value!,
-                Path = config.GetSection("FileInfo").GetSection("RefFile").GetSection("RefFilePath").Value!
+                FileName = config.GetSection("FileInfo").GetSection("LastUpdateRefFile").GetSection("LastUpdateRefFileName").Value!,
+                Path = config.GetSection("FileInfo").GetSection("LastUpdateRefFile").GetSection("LastUpdateRefFilePath").Value!
             };
 
             //Check to see if the file has been updated since the last update
-            foreach (var fileDto in filesUpdatedAtList)
+            foreach (var transferFile in filesToUpdateList)
             {
-                if (File.ReadAllText(updatesRefFile.Path).Contains($"{fileDto.FileName}, {File.GetLastWriteTime(fileDto.Path)}"))
+                if (File.ReadAllText(lastUpdateRefFile.Path).Contains($"{transferFile.FileName}, {File.GetLastWriteTime(transferFile.Path)}"))
                 {
-                    Console.WriteLine($"File - {fileDto.FileName} - has not been updated since previous upload...");
+                    Console.WriteLine($"File - {transferFile.FileName} - has not been updated since previous upload");
                     continue;
                 }
 
-                // Create OAuth credentials using a client ID and client secret
-                UserCredential credential = GoogleWebAuthorizationBroker.AuthorizeAsync(
-                    new ClientSecrets
-                    {
-                        ClientId = clientId,
-                        ClientSecret = clientSecret
-                    },
-                    new[] { DriveService.Scope.DriveFile },
-                    "user",
-                    CancellationToken.None
-                ).Result;
+                // Upload File
+                UploadFileToDrive(service, transferFile);
 
-                // Create Drive API service
-                var service = new DriveService(new BaseClientService.Initializer()
-                {
-                    HttpClientInitializer = credential,
-                    ApplicationName = config.GetSection("Google").GetSection("AppName").Value!
-                });
-
-                // File upload parameters
-                var fileMetadata = new Google.Apis.Drive.v3.Data.File()
-                {
-                    Name = fileDto.FileName, // Name of the file in Google Drive
-                };
-                FilesResource.CreateMediaUpload request;
-
-                using (var stream = new FileStream(fileDto.Path, FileMode.Open))
-                {
-                    request = service.Files.Create(fileMetadata, stream, "application/octet-stream");
-                    request.Fields = "id";
-                    request.Upload();
-                }
-
-                Console.WriteLine("Updating uploaded files' LastUpdateTime.txt...");
-                File.AppendAllLines(updatesRefFile.Path, new List<string> { $"{fileDto.FileName}, {File.GetLastWriteTime(fileDto.Path)}" });
-
-                var file = request.ResponseBody;
-
-                Console.WriteLine($"File ID: {file.Id}");
+                Console.WriteLine("Updating uploaded files LastUpdateTime...");
+                File.AppendAllLines(lastUpdateRefFile.Path, new List<string> { $"{transferFile.FileName}, {File.GetLastWriteTime(transferFile.Path)}" });
             }
+        }
+
+        private static UserCredential SetupUserCredential(IConfigurationRoot config)
+        {
+            // OAuth credentials
+            var clientId = config.GetSection("Google").GetSection("Credentials").GetSection("ClientId").Value!;
+            var clientSecret = config.GetSection("Google").GetSection("Credentials").GetSection("ClientSecret").Value!;
+
+            UserCredential credential = GoogleWebAuthorizationBroker.AuthorizeAsync(
+                new ClientSecrets
+                {
+                    ClientId = clientId,
+                    ClientSecret = clientSecret
+                },
+                new[] { DriveService.Scope.DriveFile },
+                "user",
+                CancellationToken.None
+            ).Result;
+
+            return credential;
+        }
+
+        private static void UploadFileToDrive(DriveService service, TransferFile fileToUpload)
+        {
+            // File upload parameters
+            var fileMetadata = new Google.Apis.Drive.v3.Data.File()
+            {
+                Name = fileToUpload.FileName, // Name of the file in Google Drive
+            };
+            FilesResource.CreateMediaUpload request;
+
+            using (var stream = new FileStream(fileToUpload.Path, FileMode.Open))
+            {
+                request = service.Files.Create(fileMetadata, stream, "application/octet-stream");
+                request.Fields = "id";
+                request.Upload();
+            }
+
+            Console.WriteLine($"Upload Successful - Name: {fileToUpload.FileName}, ID: {request.ResponseBody.Id}");
         }
     }
 }
