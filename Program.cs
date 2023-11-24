@@ -96,7 +96,6 @@ namespace GoogleDriveUpdateService
     }
 }
 
-
 // TODO
 // Update this so that instead of uploading a file, upload a 
 // a directory, including all child directories/files
