@@ -9,7 +9,7 @@ namespace GoogleDriveUpdateService
 {
     public class Program
     {
-        private static TransferFile _lastUpdateRefFile;
+        private static TransferFile? _lastUpdateRefFile;
 
         static void Main(string[] args)
         {
@@ -35,29 +35,27 @@ namespace GoogleDriveUpdateService
             var filesToUploadList = new List<TransferFile>();
             foreach (var child in config.GetSection("FileInfo").GetSection("FileList").GetChildren())
             {
-                var TransferFileToAdd = new TransferFile
+                var transferFileToAdd = new TransferFile
                 {
-                    FileName = child.GetSection("FileName").Value!,
-                    Path = child.GetSection($"FilePath").Value!
+                    Name = child.GetSection("FileName").Value!,
+                    Path = child.GetSection("FilePath").Value!
                 };
 
-                filesToUploadList.Add(TransferFileToAdd);
-                Console.WriteLine($"{TransferFileToAdd.FileName} added to updload list");
+                filesToUploadList.Add(transferFileToAdd);
+                Console.WriteLine($"{transferFileToAdd.Name} added to updload list");
             }
 
             // LastUpdatedTime.txt - to get all files' last updated date/time
             _lastUpdateRefFile = new TransferFile
             {
-                FileName = config.GetSection("FileInfo").GetSection("LastUpdateRefFile").GetSection("LastUpdateRefFileName").Value!,
+                Name = config.GetSection("FileInfo").GetSection("LastUpdateRefFile").GetSection("LastUpdateRefFileName").Value!,
                 Path = config.GetSection("FileInfo").GetSection("LastUpdateRefFile").GetSection("LastUpdateRefFilePath").Value!
             };
 
+            var autoUploadsFolderId = config.GetSection("Google").GetSection("Drive").GetSection("AutoUploadsFolderId").Value!;
             foreach (var fileDirectory in filesToUploadList)
             {
-                TraverseDirectory(service, fileDirectory.Path);
-
-                Console.WriteLine("Updating uploaded files LastUpdateTime...");
-                File.AppendAllLines(_lastUpdateRefFile.Path, new List<string> { $"{fileDirectory.FileName}, {File.GetLastWriteTime(fileDirectory.Path)}" });
+                TraverseDirectory(service, fileDirectory.Path, autoUploadsFolderId);
             }
         }
 
@@ -81,7 +79,7 @@ namespace GoogleDriveUpdateService
             return credential;
         }
 
-        private static void TraverseDirectory(DriveService service, string directoryPath)
+        private static void TraverseDirectory(DriveService service, string directoryPath, string parentId)
         {
             // Get all files in the current directory
             var currentDirectoryName = Path.GetFileName(directoryPath);
@@ -96,7 +94,7 @@ namespace GoogleDriveUpdateService
             catch (IOException ex)
             {
                 Console.WriteLine("Writing single file at root...");
-                UploadFileToDrive(service, directoryPath);
+                UploadFileToDrive(service, directoryPath, parentId);
 
                 return;
             }
@@ -106,6 +104,7 @@ namespace GoogleDriveUpdateService
             var fileMetadata = new Google.Apis.Drive.v3.Data.File
             {
                 Name = currentDirectoryName,
+                Parents = new[] { parentId },
                 MimeType = "application/vnd.google-apps.folder"
             };
 
@@ -118,7 +117,7 @@ namespace GoogleDriveUpdateService
                 Console.WriteLine($"File: {filePath}");
 
                 // Upload File
-                UploadFileToDrive(service, filePath);
+                UploadFileToDrive(service, filePath, directory.Id);
             }
 
             // Get all subdirectories in the current directory
@@ -129,11 +128,11 @@ namespace GoogleDriveUpdateService
                 Console.WriteLine($"Subdirectory: {subdirectoryName}");
 
                 // Recursive call to traverse subdirectories
-                TraverseDirectory(service, subdirectory);
+                TraverseDirectory(service, subdirectory, directory.Id);
             }
         }
 
-        private static void UploadFileToDrive(DriveService service, string filePath)
+        private static void UploadFileToDrive(DriveService service, string filePath, string parentId)
         {
             var fileName = Path.GetFileName(filePath);
 
@@ -141,7 +140,9 @@ namespace GoogleDriveUpdateService
             var fileMetadata = new Google.Apis.Drive.v3.Data.File()
             {
                 Name = fileName, // Name of the file in Google Drive
+                Parents =  new[] { parentId }
             };
+
             FilesResource.CreateMediaUpload request;
 
             using (var stream = new FileStream(filePath, FileMode.Open))
@@ -152,6 +153,9 @@ namespace GoogleDriveUpdateService
             }
 
             Console.WriteLine($"Upload Successful - Name: {fileName}, ID: {request.ResponseBody.Id}");
+
+            Console.WriteLine("Updating uploaded files LastUpdateTime...");
+            File.AppendAllLines(_lastUpdateRefFile.Path, new List<string> { $"{fileName}, {File.GetLastWriteTime(filePath)}" });
         }
     }
 }
