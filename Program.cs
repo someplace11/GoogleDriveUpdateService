@@ -1,19 +1,23 @@
 ﻿using Google.Apis.Auth.OAuth2;
 using Google.Apis.Drive.v3;
+using Google.Apis.Drive.v3.Data;
+using GFile = Google.Apis.Drive.v3.Data.File;
 using Google.Apis.Services;
 using GoogleDriveUpdateService.Models;
 using Microsoft.Extensions.Configuration;
-using System.Net;
+using System.Diagnostics;
 
 namespace GoogleDriveUpdateService
 {
     public class Program
     {
         private static TransferFile? _lastUpdateRefFile;
+        private static string? _autoUploadsFolderId;
 
         static void Main(string[] args)
         {
             Console.WriteLine("Application starting...");
+            var stopwatch = Stopwatch.StartNew();
 
             // Setup
             var config = new ConfigurationBuilder()
@@ -46,17 +50,24 @@ namespace GoogleDriveUpdateService
             }
 
             // LastUpdatedTime.txt - to get all files' last updated date/time
+            _autoUploadsFolderId = config.GetSection("Google").GetSection("Drive").GetSection("AutoUploadsFolderId").Value!;
             _lastUpdateRefFile = new TransferFile
             {
                 Name = config.GetSection("FileInfo").GetSection("LastUpdateRefFile").GetSection("LastUpdateRefFileName").Value!,
                 Path = config.GetSection("FileInfo").GetSection("LastUpdateRefFile").GetSection("LastUpdateRefFilePath").Value!
             };
 
-            var autoUploadsFolderId = config.GetSection("Google").GetSection("Drive").GetSection("AutoUploadsFolderId").Value!;
             foreach (var fileDirectory in filesToUploadList)
             {
-                TraverseDirectory(service, fileDirectory.Path, autoUploadsFolderId);
+                TraverseDirectory(service, fileDirectory.Path, _autoUploadsFolderId);
             }
+
+            // Get all direct children of !AutoUploads and if any of the names are duplicates
+            // delete until only 3 left, starting from oldest
+            GetAutoUploadChildren(service);
+
+            stopwatch.Stop();
+            Console.WriteLine($"Elapsed Time: {stopwatch.Elapsed}");
         }
 
         private static UserCredential SetupUserCredential(IConfigurationRoot config)
@@ -153,12 +164,64 @@ namespace GoogleDriveUpdateService
             }
 
             Console.WriteLine($"Upload Successful - Name: {fileName}, ID: {request.ResponseBody.Id}");
+        }
 
-            Console.WriteLine("Updating uploaded files LastUpdateTime...");
-            File.AppendAllLines(_lastUpdateRefFile.Path, new List<string> { $"{fileName}, {File.GetLastWriteTime(filePath)}" });
+        private static void GetAutoUploadChildren(DriveService service)
+        {
+            var request = service.Files.List();
+            request.Q = $"trashed=false and '{_autoUploadsFolderId}' in parents";
+            request.Fields = "files(id, name, modifiedTime)";
+
+            var result = request.Execute();
+            var children = result.Files;
+
+            // 1) Get a list of all direct child of AutoUploads Names, Ids, UpdateTimes
+            // 2) If >3 of any entry, delete the oldest
+            Console.WriteLine("Children in AutoUploads:");
+            var fileCountDict = new Dictionary<string, int>();
+            foreach (var child in children)
+            {
+                Console.WriteLine($"{child.Name}: {child.ModifiedTimeDateTimeOffset}");
+
+                if (!fileCountDict.ContainsKey(child.Name))
+                {
+                    Console.WriteLine($"Adding new fileName to dictionary {child.Name}...");
+                    fileCountDict.Add(child.Name, 1);
+                }
+                else
+                {
+                    fileCountDict[child.Name]++;
+                }
+
+                Console.WriteLine($"{child.Name}: {fileCountDict[child.Name]}");
+
+                if (fileCountDict[child.Name] > 3)
+                {
+                    var oldestCopy = children
+                        .Where(f => f.Name == child.Name)
+                        .OrderBy(f => f.ModifiedTimeDateTimeOffset)
+                        .FirstOrDefault();
+
+                    Console.WriteLine($"Deleting oldest copy of {oldestCopy.Name} from {oldestCopy.ModifiedTimeDateTimeOffset}");
+
+                    //DeleteGoogleDriveFile(service, oldestCopy!.Id);
+                    service.Files.Delete(oldestCopy.Id).Execute();
+                }
+            }
         }
     }
 }
+
+// TODO - TOP PRIORITY
+// Clean up and split out into real project
+
+// TODO - TOP PRIORITY
+// Create new functionality to copy files from one directory into 
+// another
+// - Mostly for save files so a quick copy can be made and zipped
+//   and copied to new parent directory to upload from, hopefully
+//   without potentially dealing with file locks or screwing up
+//   the file owners task
 
 // TODO
 // Target Ubuntu for deployment
@@ -183,3 +246,11 @@ namespace GoogleDriveUpdateService
 // oldest until number of files with the same name == n
 // -
 // TLDR: Clean up multiple copies of Google Drive saves up to threshold
+
+// TODO
+// Create config file to replace appsettings.json
+
+// TODO
+// Create a Path helper class (if not already part of Path) in order
+// to remove TransferFile class and just stick with using paths for
+// for everything
