@@ -9,6 +9,8 @@ namespace GoogleDriveUpdateService
 {
     public class Program
     {
+        private static TransferFile _lastUpdateRefFile;
+
         static void Main(string[] args)
         {
             Console.WriteLine("Application starting...");
@@ -30,7 +32,7 @@ namespace GoogleDriveUpdateService
             });
 
             // File names and paths you want to upload, read from appsettings
-            var filesToUpdateList = new List<TransferFile>();
+            var filesToUploadList = new List<TransferFile>();
             foreach (var child in config.GetSection("FileInfo").GetSection("FileList").GetChildren())
             {
                 var TransferFileToAdd = new TransferFile
@@ -39,31 +41,23 @@ namespace GoogleDriveUpdateService
                     Path = child.GetSection($"FilePath").Value!
                 };
 
-                filesToUpdateList.Add(TransferFileToAdd);
-                Console.WriteLine($"{TransferFileToAdd.FileName} added to update list");
+                filesToUploadList.Add(TransferFileToAdd);
+                Console.WriteLine($"{TransferFileToAdd.FileName} added to updload list");
             }
 
             // LastUpdatedTime.txt - to get all files' last updated date/time
-            var lastUpdateRefFile = new TransferFile
+            _lastUpdateRefFile = new TransferFile
             {
                 FileName = config.GetSection("FileInfo").GetSection("LastUpdateRefFile").GetSection("LastUpdateRefFileName").Value!,
                 Path = config.GetSection("FileInfo").GetSection("LastUpdateRefFile").GetSection("LastUpdateRefFilePath").Value!
             };
 
-            //Check to see if the file has been updated since the last update
-            foreach (var transferFile in filesToUpdateList)
+            foreach (var fileDirectory in filesToUploadList)
             {
-                if (File.ReadAllText(lastUpdateRefFile.Path).Contains($"{transferFile.FileName}, {File.GetLastWriteTime(transferFile.Path)}"))
-                {
-                    Console.WriteLine($"File - {transferFile.FileName} - has not been updated since previous upload");
-                    continue;
-                }
-
-                // Upload File
-                UploadFileToDrive(service, transferFile);
+                TraverseDirectory(service, fileDirectory.Path);
 
                 Console.WriteLine("Updating uploaded files LastUpdateTime...");
-                File.AppendAllLines(lastUpdateRefFile.Path, new List<string> { $"{transferFile.FileName}, {File.GetLastWriteTime(transferFile.Path)}" });
+                File.AppendAllLines(_lastUpdateRefFile.Path, new List<string> { $"{fileDirectory.FileName}, {File.GetLastWriteTime(fileDirectory.Path)}" });
             }
         }
 
@@ -87,61 +81,101 @@ namespace GoogleDriveUpdateService
             return credential;
         }
 
-        private static void UploadFileToDrive(DriveService service, TransferFile fileToUpload)
+        private static void TraverseDirectory(DriveService service, string directoryPath)
         {
+            // Get all files in the current directory
+            var currentDirectoryName = Path.GetFileName(directoryPath);
+
+            // TODO
+            // Make this less awful
+            var files = new string[0];
+            try
+            {
+                files = Directory.GetFiles(directoryPath);
+            }
+            catch (IOException ex)
+            {
+                Console.WriteLine("Writing single file at root...");
+                UploadFileToDrive(service, directoryPath);
+
+                return;
+            }
+
+            Console.WriteLine($"Current Directory: {currentDirectoryName}");
+
+            var fileMetadata = new Google.Apis.Drive.v3.Data.File
+            {
+                Name = currentDirectoryName,
+                MimeType = "application/vnd.google-apps.folder"
+            };
+
+            var createDirectoryRequest = service.Files.Create(fileMetadata);
+            createDirectoryRequest.Fields = "id";
+            var directory = createDirectoryRequest.Execute();
+
+            foreach (var filePath in files)
+            {
+                Console.WriteLine($"File: {filePath}");
+
+                // Upload File
+                UploadFileToDrive(service, filePath);
+            }
+
+            // Get all subdirectories in the current directory
+            string[] subdirectories = Directory.GetDirectories(directoryPath);
+            foreach (var subdirectory in subdirectories)
+            {
+                var subdirectoryName = Path.GetFileName(subdirectory);
+                Console.WriteLine($"Subdirectory: {subdirectoryName}");
+
+                // Recursive call to traverse subdirectories
+                TraverseDirectory(service, subdirectory);
+            }
+        }
+
+        private static void UploadFileToDrive(DriveService service, string filePath)
+        {
+            var fileName = Path.GetFileName(filePath);
+
             // File upload parameters
             var fileMetadata = new Google.Apis.Drive.v3.Data.File()
             {
-                Name = fileToUpload.FileName, // Name of the file in Google Drive
+                Name = fileName, // Name of the file in Google Drive
             };
             FilesResource.CreateMediaUpload request;
 
-            using (var stream = new FileStream(fileToUpload.Path, FileMode.Open))
+            using (var stream = new FileStream(filePath, FileMode.Open))
             {
                 request = service.Files.Create(fileMetadata, stream, "application/octet-stream");
                 request.Fields = "id";
                 request.Upload();
             }
 
-            Console.WriteLine($"Upload Successful - Name: {fileToUpload.FileName}, ID: {request.ResponseBody.Id}");
+            Console.WriteLine($"Upload Successful - Name: {fileName}, ID: {request.ResponseBody.Id}");
         }
     }
 }
-
-// TODO
-// Update this so that instead of uploading a file, upload a 
-// a directory, including all child directories/files
-// Eventually, update so that this can upload a directory
-// with any number of sub-directories/files so that I can
-// designate one folder save particular files to to be
-// automatically uploaded just by nature of being in that
-// directory
-
-// TODO
-// Implement memory cache for LastUpdatedTime to replace physical file
-// since this will be an always-running background task
 
 // TODO
 // Target Ubuntu for deployment
 
 // TODO
 // Setup scheduler
+// -
+// Maybe try to see if it's possible to have a background task that
+// goes nearly 100% down while not active and use an internal timer
+// to "wake the service". Only really useful if the service is nearly
+// completely asleep when not in use since this would be a dumb thing
+// to waste resources on running in background. Just use a scheduler.
 
 // TODO
-// Update LastUpdateTime.txt with a new dictionary-readable entry where
-// key=fileName, value=lastUpdatedDateTime
-// When next upload cycle runs, append a new line with a new dictionary entry
-// for {fileName, lastUpdatedDateTime} and leave 'if' check to use '.Contains()'
-// which should == true regardless of position in file
-// Since this will be a scheduled background service, clear the LastUpdatedTime.txt
-// file every 24 hrs or every day at midnight to prevent file clutter build up
+// Fix 'append new line with dictionary<fileName, lastUpdated>' logic to
+// override an entry with the same key value to only update lastUpdated
 
 // TODO
 // Since (at least game saves) files/directory will be named the same,
 // get a list of all files/documents/directories and if there are more
 // than n number of files with the same name, delete them starting from
 // oldest until number of files with the same name == n
-
-// TODO
-// Fix 'append new line with dictionary<fileName, lastUpdated>' to
-// override an entry with the same key value to only update lastUpdated
+// -
+// TLDR: Clean up multiple copies of Google Drive saves up to threshold
